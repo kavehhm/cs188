@@ -7,7 +7,7 @@ import { createServer as createViteServer } from "vite";
 const app = express();
 const port = Number(process.env.PORT || 5173);
 const isProduction = process.env.NODE_ENV === "production";
-const modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
 app.use(express.json({ limit: "1mb" }));
 
@@ -209,8 +209,16 @@ app.post("/api/plan", async (request, response) => {
 
     response.json(normalizeGeminiPlan(rawPlan, tasks, calendarEvents));
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Gemini planning failed.";
+    const isQuotaError =
+      message.includes("RESOURCE_EXHAUSTED") ||
+      message.includes("quota") ||
+      message.includes("429");
+
     response.status(500).json({
-      error: error instanceof Error ? error.message : "Gemini planning failed.",
+      error: isQuotaError
+        ? `Gemini quota is exhausted for ${modelName}. Try again after the retry delay, switch projects/API keys, or enable billing in Google AI Studio.`
+        : message,
     });
   }
 });
