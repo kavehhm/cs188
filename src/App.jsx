@@ -407,6 +407,64 @@ function buildPlan(tasks, calendarEvents, checkIn, contextNote, manualOrder) {
   };
 }
 
+function getFreeSlots(calendarEvents) {
+  const dayStart = 8 * 60;
+  const dayEnd = 21 * 60;
+  const busy = calendarEvents
+    .map((event) => ({
+      start: timeToMinutes(event.start),
+      end: timeToMinutes(event.end),
+    }))
+    .sort((a, b) => a.start - b.start);
+  const freeSlots = [];
+  let cursor = dayStart;
+
+  for (const block of busy) {
+    if (cursor < block.start) {
+      freeSlots.push({ start: cursor, end: block.start });
+    }
+
+    cursor = Math.max(cursor, block.end);
+  }
+
+  if (cursor < dayEnd) {
+    freeSlots.push({ start: cursor, end: dayEnd });
+  }
+
+  return freeSlots;
+}
+
+function packScheduledTasks(tasksInOrder, calendarEvents) {
+  const freeSlots = getFreeSlots(calendarEvents);
+  const scheduled = [];
+  const overflow = [];
+
+  for (const task of tasksInOrder) {
+    let placed = false;
+
+    for (const slot of freeSlots) {
+      if (slot.end - slot.start >= task.duration) {
+        const start = slot.start;
+        const end = start + task.duration;
+
+        scheduled.push({ ...task, start, end });
+        slot.start = end;
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      overflow.push({
+        ...task,
+        reason: "Moved out of today's visible plan because no open slot fit it.",
+      });
+    }
+  }
+
+  return { scheduled, overflow };
+}
+
 function createEmptySchedule() {
   return {
     scheduled: [],
@@ -475,6 +533,7 @@ function TimelineBlock({
   onDrop,
   onToggleDone,
   onShiftCalendarEvent,
+  onMoveTask,
 }) {
   const isCalendar = item.type === "calendar";
 
@@ -482,7 +541,14 @@ function TimelineBlock({
     <motion.div
       layout
       draggable={isTask}
-      onDragStart={() => isTask && onDragStart(item.id)}
+      onDragStart={(event) => {
+        if (isTask) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", item.id);
+          onDragStart(item.id);
+        }
+      }}
+      onDragEnd={() => isTask && onDragStart(null)}
       onDragOver={(event) => {
         if (isTask) event.preventDefault();
       }}
@@ -560,15 +626,37 @@ function TimelineBlock({
         </div>
 
         {isTask && (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-8 w-8 rounded-full"
-            aria-label={`Mark ${item.title} ${item.done ? "not done" : "done"}`}
-            onClick={() => onToggleDone(item.id)}
-          >
-            ✓
-          </Button>
+          <div className="flex shrink-0 gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 rounded-full"
+              aria-label={`Move ${item.title} earlier in plan`}
+              onClick={() => onMoveTask(item.id, -1)}
+            >
+              -
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 rounded-full"
+              aria-label={`Move ${item.title} later in plan`}
+              onClick={() => onMoveTask(item.id, 1)}
+            >
+              +
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 rounded-full"
+              aria-label={`Mark ${item.title} ${item.done ? "not done" : "done"}`}
+              onClick={() => onToggleDone(item.id)}
+            >
+              ✓
+            </Button>
+          </div>
         )}
 
         {isCalendar && (
@@ -838,13 +926,69 @@ export default function CalmAIDayPlanner() {
   const onDrop = (targetId) => {
     if (!dragId || dragId === targetId) return;
 
-    const ids = generatedSchedule.scheduled.map((task) => task.id);
+    const sortedTasks = [...generatedSchedule.scheduled].sort(
+      (a, b) => a.start - b.start
+    );
+    const taskById = new Map(sortedTasks.map((task) => [task.id, task]));
+    const ids = sortedTasks.map((task) => task.id);
     const filtered = ids.filter((id) => id !== dragId);
     const targetIndex = filtered.indexOf(targetId);
 
-    filtered.splice(targetIndex, 0, dragId);
-    setManualOrder(filtered);
+    filtered.splice(targetIndex >= 0 ? targetIndex : filtered.length, 0, dragId);
+
+    const packed = packScheduledTasks(
+      filtered.map((id) => taskById.get(id)).filter(Boolean),
+      calendarEvents
+    );
+    const movedIds = new Set([
+      ...packed.scheduled.map((task) => task.id),
+      ...packed.overflow.map((task) => task.id),
+    ]);
+
+    setGeneratedSchedule((prev) => ({
+      ...prev,
+      scheduled: packed.scheduled,
+      unscheduled: [
+        ...packed.overflow,
+        ...prev.unscheduled.filter((task) => !movedIds.has(task.id)),
+      ],
+      strategy: "You manually adjusted the generated plan order.",
+    }));
+    setManualOrder(packed.scheduled.map((task) => task.id));
     setDragId(null);
+  };
+
+  const moveTaskInPlan = (id, direction) => {
+    const sortedTasks = [...generatedSchedule.scheduled].sort(
+      (a, b) => a.start - b.start
+    );
+    const index = sortedTasks.findIndex((task) => task.id === id);
+    const nextIndex = index + direction;
+
+    if (index < 0 || nextIndex < 0 || nextIndex >= sortedTasks.length) return;
+
+    const nextTasks = [...sortedTasks];
+    [nextTasks[index], nextTasks[nextIndex]] = [
+      nextTasks[nextIndex],
+      nextTasks[index],
+    ];
+
+    const packed = packScheduledTasks(nextTasks, calendarEvents);
+    const movedIds = new Set([
+      ...packed.scheduled.map((task) => task.id),
+      ...packed.overflow.map((task) => task.id),
+    ]);
+
+    setGeneratedSchedule((prev) => ({
+      ...prev,
+      scheduled: packed.scheduled,
+      unscheduled: [
+        ...packed.overflow,
+        ...prev.unscheduled.filter((task) => !movedIds.has(task.id)),
+      ],
+      strategy: "You manually adjusted the generated plan order.",
+    }));
+    setManualOrder(packed.scheduled.map((task) => task.id));
   };
 
   const toggleDone = (id) => {
@@ -1353,6 +1497,7 @@ export default function CalmAIDayPlanner() {
                   onDrop={onDrop}
                   onToggleDone={toggleDone}
                   onShiftCalendarEvent={shiftCalendarEvent}
+                  onMoveTask={moveTaskInPlan}
                 />
               ))}
             </CardContent>
