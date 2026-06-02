@@ -240,6 +240,14 @@ function minutesToTime(minutesAfterMidnight) {
   return `${displayHours}:${String(minutes).padStart(2, "0")} ${suffix}`;
 }
 
+function minutesToInputTime(minutesAfterMidnight) {
+  const safeMinutes = Math.max(0, Math.min(23 * 60 + 59, minutesAfterMidnight));
+  const hours = Math.floor(safeMinutes / 60);
+  const minutes = safeMinutes % 60;
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function getPreferredKinds(checkIn) {
   if (checkIn.energy <= 30) return ["light", "creative", "deep"];
 
@@ -411,6 +419,10 @@ function createEmptySchedule() {
   };
 }
 
+function getEventDuration(event) {
+  return Math.max(15, timeToMinutes(event.end) - timeToMinutes(event.start));
+}
+
 function inferKind(title, description, duration) {
   const text = `${title} ${description}`.toLowerCase();
 
@@ -462,6 +474,7 @@ function TimelineBlock({
   onDragStart,
   onDrop,
   onToggleDone,
+  onShiftCalendarEvent,
 }) {
   const isCalendar = item.type === "calendar";
 
@@ -557,6 +570,30 @@ function TimelineBlock({
             ✓
           </Button>
         )}
+
+        {isCalendar && (
+          <div className="flex shrink-0 gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 rounded-full"
+              aria-label={`Move ${item.title} 15 minutes earlier`}
+              onClick={() => onShiftCalendarEvent(item.id, -15)}
+            >
+              -
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 rounded-full"
+              aria-label={`Move ${item.title} 15 minutes later`}
+              onClick={() => onShiftCalendarEvent(item.id, 15)}
+            >
+              +
+            </Button>
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -572,7 +609,7 @@ export default function CalmAIDayPlanner() {
   const [contextNote, setContextNote] = useState(
     "Did not sleep well last night, have a headache."
   );
-  const [calendarEvents] = useState(calendarEventsSeed);
+  const [calendarEvents, setCalendarEvents] = useState(calendarEventsSeed);
   const [tasks, setTasks] = useState(tasksSeed);
   const [newTask, setNewTask] = useState({
     title: "",
@@ -662,6 +699,79 @@ export default function CalmAIDayPlanner() {
 
     setTasks((prev) => [...prev, task]);
     setVoiceDraft("");
+  };
+
+  const updateCalendarEvent = (id, patch) => {
+    setCalendarEvents((prev) =>
+      prev.map((event) => {
+        if (event.id !== id) return event;
+
+        const next = { ...event, ...patch };
+
+        if (patch.start && !patch.end) {
+          const duration = getEventDuration(event);
+          const nextStart = timeToMinutes(patch.start);
+          const nextEnd = Math.min(23 * 60 + 59, nextStart + duration);
+          next.end = minutesToInputTime(nextEnd);
+        }
+
+        if (timeToMinutes(next.end) <= timeToMinutes(next.start)) {
+          const nextEnd = Math.min(23 * 60 + 59, timeToMinutes(next.start) + 30);
+          next.end = minutesToInputTime(nextEnd);
+        }
+
+        return next;
+      })
+    );
+    setHasGeneratedPlan(false);
+    setGeneratedSchedule(createEmptySchedule());
+    setPlanError("");
+  };
+
+  const addCalendarEvent = () => {
+    setCalendarEvents((prev) => [
+      ...prev,
+      {
+        id: `cal-${Date.now()}`,
+        title: "Fixed event",
+        start: "13:00",
+        end: "14:00",
+        type: "calendar",
+      },
+    ]);
+    setHasGeneratedPlan(false);
+    setGeneratedSchedule(createEmptySchedule());
+  };
+
+  const removeCalendarEvent = (id) => {
+    setCalendarEvents((prev) => prev.filter((event) => event.id !== id));
+    setHasGeneratedPlan(false);
+    setGeneratedSchedule(createEmptySchedule());
+    setPlanError("");
+  };
+
+  const shiftCalendarEvent = (id, deltaMinutes) => {
+    setCalendarEvents((prev) =>
+      prev.map((event) => {
+        if (event.id !== id) return event;
+
+        const duration = getEventDuration(event);
+        const currentStart = timeToMinutes(event.start);
+        const nextStart = Math.max(
+          0,
+          Math.min(23 * 60 + 59 - duration, currentStart + deltaMinutes)
+        );
+
+        return {
+          ...event,
+          start: minutesToInputTime(nextStart),
+          end: minutesToInputTime(nextStart + duration),
+        };
+      })
+    );
+    setHasGeneratedPlan(false);
+    setGeneratedSchedule(createEmptySchedule());
+    setPlanError("");
   };
 
   const sendChatMessage = () => {
@@ -903,6 +1013,82 @@ export default function CalmAIDayPlanner() {
                   {isPlanning ? "Planning..." : "Generate"}
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-3xl border-white/60 bg-white/70 backdrop-blur">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between gap-3">
+                <span>📅 Fixed Events</span>
+                <Button
+                  onClick={addCalendarEvent}
+                  variant="secondary"
+                  className="h-8 rounded-2xl px-3"
+                >
+                  Add
+                </Button>
+              </CardTitle>
+            </CardHeader>
+
+            <CardContent className="space-y-3">
+              {calendarEvents.map((event) => (
+                <div
+                  key={event.id}
+                  className="space-y-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-3"
+                >
+                  <Input
+                    value={event.title}
+                    onChange={(inputEvent) =>
+                      updateCalendarEvent(event.id, {
+                        title: inputEvent.target.value,
+                      })
+                    }
+                    className="rounded-2xl border-sky-100 bg-white"
+                  />
+
+                  <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <Input
+                      type="time"
+                      value={event.start}
+                      onInput={(inputEvent) =>
+                        updateCalendarEvent(event.id, {
+                          start: inputEvent.currentTarget.value,
+                        })
+                      }
+                      onChange={(inputEvent) =>
+                        updateCalendarEvent(event.id, {
+                          start: inputEvent.target.value,
+                        })
+                      }
+                      className="rounded-2xl border-sky-100 bg-white"
+                    />
+
+                    <Input
+                      type="time"
+                      value={event.end}
+                      onInput={(inputEvent) =>
+                        updateCalendarEvent(event.id, {
+                          end: inputEvent.currentTarget.value,
+                        })
+                      }
+                      onChange={(inputEvent) =>
+                        updateCalendarEvent(event.id, {
+                          end: inputEvent.target.value,
+                        })
+                      }
+                      className="rounded-2xl border-sky-100 bg-white"
+                    />
+
+                    <Button
+                      onClick={() => removeCalendarEvent(event.id)}
+                      variant="ghost"
+                      className="h-10 rounded-2xl px-3"
+                    >
+                      ×
+                    </Button>
+                  </div>
+                </div>
+              ))}
             </CardContent>
           </Card>
 
@@ -1166,6 +1352,7 @@ export default function CalmAIDayPlanner() {
                   onDragStart={setDragId}
                   onDrop={onDrop}
                   onToggleDone={toggleDone}
+                  onShiftCalendarEvent={shiftCalendarEvent}
                 />
               ))}
             </CardContent>
